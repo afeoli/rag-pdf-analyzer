@@ -2,9 +2,9 @@
 
 Upload a PDF file and ask questions about it using Retrieval-Augmented Generation (RAG). Built with FastAPI backend and React frontend.
 
-<div style="display: flex; gap: 20px;">
-  <img src="docs/rag-pdf-analyzer-screenshot.png" alt="RAG PDF Analyzer UI" width="400" />
-  <img src="docs/scannedcontract.png" alt="RAG PDF Analyzer UI" width="400" />
+<div style="display: flex; gap: 20px; align-items: flex-start;">
+  <img src="docs/scannedcontract.png" alt="example pdf" width="400" />
+  <img src="docs/rag-pdf-analyzer-screenshot.png" alt="RAG PDF Analyzer UI" width="500" />
 </div>
 
 ## Features
