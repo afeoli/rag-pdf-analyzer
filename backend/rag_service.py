@@ -1,7 +1,5 @@
 import os
-import tempfile
-import re
-import time
+import atexit
 from typing import List, Optional
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -10,8 +8,23 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-import pypdf
+from docling.document_converter import DocumentConverter
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
+from docling.document_converter import PdfFormatOption
 from openai import OpenAI
+
+def cleanup_multiprocessing():
+    try:
+        import multiprocessing
+        for process in multiprocessing.active_children():
+            process.terminate()
+            process.join()
+    except:
+        pass
+
+# Register cleanup function
+atexit.register(cleanup_multiprocessing)
 
 RETRIEVAL_K = 4
 LINES_PER_PAGE_ESTIMATE = 50
@@ -88,36 +101,6 @@ Answer: """
                         return line_stripped[:50]
         return 'N/A'
 
-    def _clean_extracted_text(self, text: str) -> str:
-        if not text:
-            return ''
-        
-        cleaned = text
-        patterns = [
-            r'^I will provide the complete text[:\s]*',
-            r'^Here is the extracted text[:\s]*',
-            r'^I\'ll extract.*?[\n\r]+',
-            r'^I can.*?extract.*?[\n\r]+',
-            r'^Here.*?extracted.*?[\n\r]+',
-            r'^The.*?content.*?[\n\r]+',
-            r'^Below.*?extracted.*?[\n\r]+',
-        ]
-        
-        for pattern in patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
-        
-        cleaned = cleaned.strip()
-        
-        lines = cleaned.split('\n')
-        
-        if lines and lines[0].lower().startswith('microsoft word'):
-            cleaned = '\n'.join(lines[1:]).strip()
-        
-        if lines and (lines[0].lower().startswith('here') or lines[0].lower().startswith('the following')):
-            cleaned = '\n'.join(lines[1:]).strip()
-        
-        return cleaned
-
     def update_api_key(self, api_key: str):
         os.environ['OPENAI_API_KEY'] = api_key
         
@@ -132,217 +115,105 @@ Answer: """
             raise RuntimeError("OpenAI API key not set. Please set API key first.")
 
     def process_pdf(self, pdf_file_path: str) -> tuple[List[Document], str]:
-        self._ensure_clients_initialized()
-        
+        """
+        Process PDF file using docling to extract text and structure.
+        """
         try:
-            with open(pdf_file_path, 'rb') as file:
-                pdf_content = file.read()
+            pipeline_options = PdfPipelineOptions()
+            pipeline_options.do_ocr = True
+            pipeline_options.do_table_structure = True
+            pipeline_options.table_structure_options.do_cell_matching = True
             
-            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
-                temp_file.write(pdf_content)
-                temp_file_path = temp_file.name
+            pdf_format_option = PdfFormatOption(pipeline_options=pipeline_options)
             
-            assistant = None
-            thread = None
-            uploaded_file = None
-            vector_store = None
+            converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: pdf_format_option
+                }
+            )
             
-            try:
-                max_wait_time = 300
-                sleep_interval = 0.5
-                poll_interval = 1
-                with open(temp_file_path, 'rb') as upload_file:
-                    uploaded_file = self.openai_client.files.create(
-                        file=upload_file,
-                        purpose='assistants'
-                    )
+            result = converter.convert(pdf_file_path)
+            
+            extracted_text = result.document.export_to_markdown()
+            
+            doc_structure = result.document
+            
+            page_texts = []
+            page_boundaries = []
+            char_count = 0
+            
+            if hasattr(doc_structure, 'pages') and doc_structure.pages:
+                for page_num, page_obj in enumerate(doc_structure.pages, 1):
+                    try:
+                        page_text = ""
+                        if hasattr(page_obj, 'export_to_markdown'):
+                            page_text = page_obj.export_to_markdown()
+                        elif hasattr(page_obj, 'text'):
+                            page_text = page_obj.text
+                        elif hasattr(page_obj, 'content'):
+                            if hasattr(page_obj.content, 'export_to_markdown'):
+                                page_text = page_obj.content.export_to_markdown()
+                            else:
+                                page_text = str(page_obj.content)
+                        else:
+                            page_text = str(page_obj)
+                        
+                        if page_text:
+                            start_char = char_count
+                            char_count += len(page_text)
+                            page_texts.append(page_text)
+                            page_boundaries.append((start_char, char_count))
+                    except Exception as e:
+                        print(f"Warning: Could not extract page {page_num}: {e}")
+                        continue
+            
+            if not page_boundaries:
+                lines = extracted_text.split('\n')
+                lines_per_page = LINES_PER_PAGE_ESTIMATE
+                num_pages = max(1, (len(lines) + lines_per_page - 1) // lines_per_page)
                 
-                while uploaded_file.status != 'processed':
-                    if uploaded_file.status == 'failed':
-                        raise Exception("File upload failed")
-                    time.sleep(sleep_interval)
-                    uploaded_file = self.openai_client.files.retrieve(uploaded_file.id)
-
-                assistant = self.openai_client.beta.assistants.create(
-                    name="PDF Extractor",
-                    instructions="Extract all text from the PDF file. Return only the text content, no formatting, explanations, or metadata. Do not include any introductory text or disclaimers.",
-                    model="gpt-4o",
-                    tools=[{"type": "file_search"}],
-                    tool_resources={
-                        "file_search": {
-                            "vector_store_ids": []
-                        }
-                    }
-                )
-
-                vector_store = self.openai_client.beta.vector_stores.create(
-                    name="PDF Vector Store"
-                )
-                
-                self.openai_client.beta.vector_stores.files.create(
-                    vector_store_id=vector_store.id,
-                    file_id=uploaded_file.id
-                )
-
-                while True:
-                    status = self.openai_client.beta.vector_stores.files.list(vector_store_id=vector_store.id)
-                    if status.data and len(status.data) > 0:
-                        file_status = status.data[0].status
-                        if file_status == 'completed':
-                            break
-                        if file_status == 'failed':
-                            raise Exception("Vector store file processing failed")
-                    time.sleep(sleep_interval)
-
-                assistant = self.openai_client.beta.assistants.update(
-                    assistant_id=assistant.id,
-                    tool_resources={
-                        "file_search": {
-                            "vector_store_ids": [vector_store.id]
-                        }
-                    }
-                )
-
-                thread = self.openai_client.beta.threads.create()
-
-                self.openai_client.beta.threads.messages.create(
-                    thread_id=thread.id,
-                    role="user",
-                    content="Extract all text from the PDF file. Return only the text content."
-                )
-
-                run = self.openai_client.beta.threads.runs.create(
-                    thread_id=thread.id,
-                    assistant_id=assistant.id
-                )
-                
-                elapsed_time = 0
-                poll_interval = 1
-                
-                while run.status in ['queued', 'in_progress', 'cancelling']:
-                    if elapsed_time >= max_wait_time:
-                        self.openai_client.beta.threads.runs.cancel(thread_id=thread.id, run_id=run.id)
-                        raise Exception("PDF processing timed out after 5 minutes")
+                for i in range(num_pages):
+                    start_line = i * lines_per_page
+                    end_line = min((i + 1) * lines_per_page, len(lines))
+                    page_lines = lines[start_line:end_line]
+                    page_text = '\n'.join(page_lines) + '\n'
                     
-                    time.sleep(poll_interval)
-                    elapsed_time += 1
-                    run = self.openai_client.beta.threads.runs.retrieve(
-                        thread_id=thread.id,
-                        run_id=run.id
-                    )
-                
-                if run.status != 'completed':
-                    error_msg = f"OpenAI extraction failed: {run.status}"
-                    if run.status == 'failed':
-                        if run.last_error:
-                            error_msg += f" - {run.last_error.message}"
-                    raise Exception(error_msg)
-                
-                messages = self.openai_client.beta.threads.messages.list(
-                    thread_id=thread.id,
-                    order='asc'
-                )
-                
-                if not messages.data or not messages.data[-1].content or not messages.data[-1].content[0].text:
-                    raise Exception("No text extracted from PDF")
-                
-                extracted_text = messages.data[-1].content[0].text.value
-                extracted_text = self._clean_extracted_text(extracted_text)
-                
-                try:
-                    self.openai_client.beta.assistants.delete(assistant.id)
-                except:
-                    pass
-                try:
-                    self.openai_client.beta.threads.delete(thread.id)
-                except:
-                    pass
-                try:
-                    self.openai_client.beta.vector_stores.delete(vector_store.id)
-                except:
-                    pass
-                try:
-                    self.openai_client.files.delete(uploaded_file.id)
-                except:
-                    pass
-
-            except Exception as e:
-                if assistant:
-                    try:
-                        self.openai_client.beta.assistants.delete(assistant.id)
-                    except:
-                        pass
-                if thread:
-                    try:
-                        self.openai_client.beta.threads.delete(thread.id)
-                    except:
-                        pass
-                if vector_store:
-                    try:
-                        self.openai_client.beta.vector_stores.delete(vector_store.id)
-                    except:
-                        pass
-                if uploaded_file:
-                    try:
-                        self.openai_client.files.delete(uploaded_file.id)
-                    except:
-                        pass
-                raise e
-            finally:
-                try:
-                    os.unlink(temp_file_path)
-                except:
-                    pass
-
-            documents = self.text_splitter.create_documents([extracted_text])
+                    start_char = char_count
+                    char_count += len(page_text)
+                    page_boundaries.append((start_char, char_count))
             
-            lines = extracted_text.split('\n')
-            current_page = 1
+            documents = self.text_splitter.create_documents([extracted_text])
             
             for i, doc in enumerate(documents):
                 chunk_text = doc.page_content
                 
-                estimated_page = self._estimate_page_number(chunk_text, lines, current_page)
+                chunk_start_text = chunk_text[:50]
+                char_offset = extracted_text.find(chunk_start_text)
+                
+                if char_offset >= 0:
+                    current_page = 1
+                    for page_idx, (start, end) in enumerate(page_boundaries, 1):
+                        if start <= char_offset < end:
+                            current_page = page_idx
+                            break
+                        elif char_offset < start:
+                            break
+                else:
+                    lines = extracted_text.split('\n')
+                    estimated_page = self._estimate_page_number(chunk_text, lines, i // len(page_boundaries) if page_boundaries else 1)
+                    current_page = estimated_page
+                
                 section = self._detect_section(chunk_text)
                 
-                doc.metadata['page'] = estimated_page
+                doc.metadata['page'] = current_page
                 doc.metadata['section'] = section
                 doc.metadata['chunk_id'] = i + 1
                 doc.metadata['source'] = 'pdf'
-                
-                current_page = estimated_page
             
             return documents, extracted_text
                 
         except Exception as e:
-            try:
-                with open(pdf_file_path, 'rb') as file:
-                    pdf_reader = pypdf.PdfReader(file)
-                    extracted_text = ""
-                    for page in pdf_reader.pages:
-                        extracted_text += page.extract_text() + "\n"
-                    
-                    documents = self.text_splitter.create_documents([extracted_text])
-                    
-                    lines = extracted_text.split('\n')
-                    current_page = 1
-                    
-                    for i, doc in enumerate(documents):
-                        chunk_text = doc.page_content
-                        estimated_page = self._estimate_page_number(chunk_text, lines, current_page)
-                        section = self._detect_section(chunk_text)
-                        
-                        doc.metadata['page'] = estimated_page
-                        doc.metadata['section'] = section
-                        doc.metadata['chunk_id'] = i + 1
-                        doc.metadata['source'] = 'pdf'
-                        
-                        current_page = estimated_page
-                    
-                    return documents, extracted_text
-                    
-            except Exception as fallback_error:
-                raise Exception(f"Failed to extract PDF: {str(fallback_error)}")
+            raise Exception(f"Failed to extract PDF with docling: {str(e)}")
 
     def add_documents(self, documents: List[Document]) -> None:
         self._ensure_clients_initialized()

@@ -19,7 +19,7 @@ Upload a PDF file and ask questions about it using Retrieval-Augmented Generatio
 - **Vector Store**: FAISS (in-memory, session-based) via LangChain Community
 - **AI Models**: OpenAI Embeddings + ChatOpenAI (via LangChain OpenAI)
 - **Frontend**: React with Vite
-- **PDF Processing**: OpenAI API for text extraction (with PyPDF as fallback)
+- **PDF Processing**: Docling for local PDF extraction with OCR and table structure recognition
 
 ### LangChain Components
 
@@ -161,12 +161,18 @@ This transparency allows you to:
 - Navigate directly to the relevant sections in your PDF for further reading
 
 ### Document Processing
+- **PDF Extraction**: Powered by Docling, which provides:
+  - Local processing (no API calls needed for PDF extraction)
+  - OCR support for scanned documents
+  - Table structure recognition
+  - Accurate page number tracking
+  - Markdown export preserving document structure (headers, tables, etc.)
 - Documents are split into configurable chunks (default: 1000 characters) with overlap (default: 200 characters)
 - Uses LangChain's RecursiveCharacterTextSplitter for optimal text segmentation
 - FAISS vector store (via LangChain Community) enables fast similarity search
 
 ### RAG Pipeline
-1. PDF text extraction using OpenAI API (with PyPDF fallback)
+1. **PDF Text Extraction**: Using Docling to extract text, preserving document structure including headers, tables, and layouts. Supports OCR for scanned documents and accurate page tracking.
 2. Text chunking with LangChain's RecursiveCharacterTextSplitter using configurable chunk size and overlap
 3. OpenAI embeddings generation (via LangChain OpenAI) for each chunk
 4. FAISS index creation (via LangChain Community) for efficient retrieval
@@ -179,4 +185,5 @@ This transparency allows you to:
 
 - Documents are stored in-memory (cleared on server restart)
 - Single session processing (no persistent storage)
-- Requires OpenAI API key and internet connection
+- Requires OpenAI API key for embeddings and LLM
+- Internet connection required for OpenAI API calls

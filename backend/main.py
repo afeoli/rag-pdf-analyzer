@@ -1,4 +1,7 @@
 import os
+
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import tempfile
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
