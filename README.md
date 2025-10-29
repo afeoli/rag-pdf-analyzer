@@ -2,6 +2,8 @@
 
 Upload a PDF file and ask questions about it using Retrieval-Augmented Generation (RAG). Built with FastAPI backend and React frontend.
 
+<img width="736" height="623" alt="Screenshot 2025-10-28 at 18 58 37" src="https://github.com/user-attachments/assets/b56b5661-deb4-4a1f-9f1b-444eb87845c3" />
+
 ## Features
 
 - **PDF Upload**: Upload PDF documents for processing
